@@ -1,5 +1,7 @@
 # Evolution API — instalador Docker
 
+Instalador da Evolution API com Docker: PostgreSQL, Redis e um script. Sobe em minutos no Ubuntu.
+
 Projecto reutilizável para instalar a [Evolution API](https://github.com/evolution-foundation/evolution-api) com PostgreSQL e Redis via Docker Compose.
 
 Baseado na stack da [RosnerTech](https://github.com/RosnerTech/evolution-api), com imagem oficial `evoapicloud/evolution-api`, versão configurável e script de instalação.
