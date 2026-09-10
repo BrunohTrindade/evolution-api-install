@@ -165,6 +165,64 @@ for name in shown:
   fi
 }
 
+resolve_install_dir() {
+  local dest_var="$1"
+  local choice=""
+  printf "Pasta de instalação:\n"
+  printf "  1) %s (recomendado)\n" "$DEFAULT_DIR"
+  printf "  2) /var/www/evolution-api\n"
+  printf "  3) Outro caminho\n"
+  ask choice "Escolhe 1, 2 ou 3" "1"
+  case "$choice" in
+    1)
+      printf -v "$dest_var" '%s' "$DEFAULT_DIR"
+      ;;
+    2)
+      printf -v "$dest_var" '%s' "/var/www/evolution-api"
+      ;;
+    3)
+      ask "$dest_var" "Caminho absoluto" "$DEFAULT_DIR"
+      ;;
+    /*)
+      printf -v "$dest_var" '%s' "$choice"
+      ;;
+    *)
+      printf -v "$dest_var" '%s' "$(pwd)/${choice}"
+      warn "«${choice}» não é 1, 2 ou 3; a usar ${!dest_var}"
+      ;;
+  esac
+}
+
+STACK_VOLUMES=(
+  evolution-api_evolution_postgres
+  evolution-api_evolution_redis
+  evolution-api_evolution_instances
+)
+
+maybe_reset_volumes() {
+  local dest="$1"
+  local keep="$2"
+  docker volume inspect evolution-api_evolution_postgres >/dev/null 2>&1 || return 0
+  if [[ "$keep" == "s" ]]; then
+    return 0
+  fi
+  warn "Já existe um volume Postgres desta stack. Senha nova não funciona com dados antigos."
+  local wipe="${EVOLUTION_RESET_VOLUMES:-}"
+  if [[ -z "$wipe" ]]; then
+    ask_yes_no wipe "Apagar volumes Docker (Postgres, Redis e instâncias) e começar do zero?" "s"
+  fi
+  if [[ "$wipe" != "s" ]]; then
+    die "Não dá para continuar com senha nova e volume antigo. Reutiliza o .env ou apaga os volumes."
+  fi
+  log "A parar contentores e apagar volumes…"
+  (
+    cd "$dest"
+    docker compose down --remove-orphans
+  ) || true
+  docker rm -f evolution_api evolution_postgres evolution_redis >/dev/null 2>&1 || true
+  docker volume rm -f "${STACK_VOLUMES[@]}" >/dev/null 2>&1 || true
+}
+
 copy_project_files() {
   local dest="$1"
   mkdir -p "$dest"
@@ -335,25 +393,37 @@ wait_api() {
   local host="127.0.0.1"
   [[ "$bind" == "0.0.0.0" || "$bind" == "127.0.0.1" ]] || host="$bind"
   local url="http://${host}:${port}"
-  local i code
+  local i code status
   log "A aguardar a API em ${url}…"
-  for i in $(seq 1 60); do
+  for i in $(seq 1 90); do
     code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 3 "${url}/" 2>/dev/null || true)"
     if [[ "$code" =~ ^[1-5][0-9][0-9]$ ]]; then
       log "API a responder (HTTP ${code})"
       return 0
     fi
+    status="$(docker inspect -f '{{.State.Status}}' evolution_api 2>/dev/null || true)"
+    if [[ "$status" == "restarting" && "$i" -ge 8 ]]; then
+      warn "O contentor da API está a reiniciar. Últimos logs:"
+      docker logs evolution_api --tail 40 2>&1 || true
+      return 1
+    fi
     sleep 2
   done
   warn "A API ainda não respondeu no tempo esperado. Vê os logs: docker compose -f ${INSTALL_DIR}/docker-compose.yml logs -f api"
+  docker logs evolution_api --tail 40 2>&1 || true
   return 1
 }
 
 print_summary() {
-  local dest="$1" server_url="$2" port="$3" ip="$4"
-  local key
+  local dest="$1" server_url="$2" port="$3" ip="$4" ready="${5:-0}"
+  local key title
   key="$(read_env_key "${dest}/.env" AUTHENTICATION_API_KEY)"
-  printf "\n${CYAN}----- Evolution API pronta -----${NC}\n"
+  if [[ "$ready" == "1" ]]; then
+    title="----- Evolution API pronta -----"
+  else
+    title="----- Instalação concluída com avisos -----"
+  fi
+  printf "\n${CYAN}%s${NC}\n" "$title"
   printf "Pasta:     %s\n" "$dest"
   printf "Versão:    %s\n" "$(read_env_key "${dest}/.env" EVOLUTION_VERSION)"
   printf "API:       %s\n" "$server_url"
@@ -382,15 +452,15 @@ main() {
 
   install_dir="${EVOLUTION_INSTALL_DIR:-}"
   if [[ -z "$install_dir" ]]; then
-    printf "Pasta de instalação sugerida:\n"
-    printf "  1) %s (recomendado)\n" "$DEFAULT_DIR"
-    printf "  2) /var/www/evolution-api\n"
-    printf "  3) Caminho à tua escolha\n"
-    ask install_dir "Caminho" "$DEFAULT_DIR"
+    resolve_install_dir install_dir
   fi
   install_dir="${install_dir%/}"
   [[ -n "$install_dir" ]] || die "Pasta inválida"
+  if [[ "$install_dir" != /* ]]; then
+    install_dir="$(pwd)/${install_dir}"
+  fi
   INSTALL_DIR="$install_dir"
+  log "Pasta de instalação: ${install_dir}"
 
   copy_project_files "$install_dir"
 
@@ -474,6 +544,7 @@ main() {
   fi
 
   write_env "$install_dir" "$version" "$port" "$bind" "$server_url" "$keep_env"
+  maybe_reset_volumes "$install_dir" "$keep_env"
   start_stack "$install_dir"
 
   if [[ "$use_apache" == "s" && -n "$domain" ]]; then
@@ -484,8 +555,11 @@ main() {
     fi
   fi
 
-  wait_api "$bind" "$port" || true
-  print_summary "$install_dir" "$server_url" "$port" "$ip"
+  local ready="0"
+  if wait_api "$bind" "$port"; then
+    ready="1"
+  fi
+  print_summary "$install_dir" "$server_url" "$port" "$ip" "$ready"
 }
 
 main "$@"
