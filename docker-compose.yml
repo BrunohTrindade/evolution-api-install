@@ -1,0 +1,67 @@
+name: evolution-api
+
+services:
+  api:
+    container_name: evolution_api
+    image: evoapicloud/evolution-api:${EVOLUTION_VERSION:-latest}
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    ports:
+      - "${EVOLUTION_BIND:-0.0.0.0}:${EVOLUTION_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Europe/Lisbon}
+      SERVER_URL: ${SERVER_URL}
+      AUTHENTICATION_API_KEY: ${AUTHENTICATION_API_KEY}
+      DATABASE_ENABLED: "true"
+      DATABASE_PROVIDER: postgresql
+      DATABASE_CONNECTION_URI: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}?schema=public
+      CACHE_REDIS_ENABLED: "true"
+      CACHE_REDIS_URI: redis://redis:6379/6
+    volumes:
+      - evolution_instances:/evolution/instances
+    networks:
+      - evolution
+
+  postgres:
+    container_name: evolution_postgres
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Europe/Lisbon}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    volumes:
+      - evolution_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks:
+      - evolution
+
+  redis:
+    container_name: evolution_redis
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - evolution_redis:/data
+    networks:
+      - evolution
+
+volumes:
+  evolution_instances:
+  evolution_postgres:
+  evolution_redis:
+
+networks:
+  evolution:
+    driver: bridge
